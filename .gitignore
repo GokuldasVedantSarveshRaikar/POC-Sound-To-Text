@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+venv/
+env/
+ENV/
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.cache
+# System files
+.DS_Store
+Thumbs.db
+
