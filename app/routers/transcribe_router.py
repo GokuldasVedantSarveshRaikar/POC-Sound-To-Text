@@ -6,7 +6,6 @@ from app.schemas.transcribe_schema import (
     WebSocketError,
     WebSocketStatus,
     HealthResponse,
-    ModelSize
 )
 
 router = APIRouter(prefix="/api/v1", tags=["transcription"])
@@ -19,14 +18,14 @@ def get_transcription_service() -> TranscriptionService:
     """Dependency to get transcription service."""
     global _transcription_service
     if _transcription_service is None:
-        _transcription_service = TranscriptionService.get_instance(ModelSize.BASE)
+        _transcription_service = TranscriptionService.get_instance()
     return _transcription_service
 
 
-def init_service(model_size: ModelSize = ModelSize.BASE) -> None:
-    """Initialize and load the transcription service."""
+def init_service() -> None:
+    """Initialize the transcription service (connects to STT API)."""
     global _transcription_service
-    _transcription_service = TranscriptionService.get_instance(model_size)
+    _transcription_service = TranscriptionService.get_instance()
     _transcription_service.load_model()
 
 
@@ -44,68 +43,55 @@ async def websocket_transcribe(
     service: TranscriptionService = Depends(get_transcription_service)
 ):
     await websocket.accept()
-    
-    # Send connected status
     await websocket.send_json(
-        WebSocketStatus(
-            type="status",
-            status="connected",
-            message="Ready to receive audio"
-        ).model_dump()
+        WebSocketStatus(type="status", status="connected", message="Ready to receive audio").model_dump()
     )
     
-    buffer = StreamingBuffer(buffer_seconds=3.0, overlap_seconds=0.5)
+    # Create buffer with service injection
+    buffer = StreamingBuffer(
+        transcription_service=service,
+        buffer_seconds=3.0,
+        overlap_seconds=0.5,
+        language="en"
+    )
+    
+    # Queue for async communication between RxPY and asyncio
+    result_queue = asyncio.Queue()
+    
+    # Capture the running event loop BEFORE subscribing (important!)
+    loop = asyncio.get_running_loop()
+    
+    # Subscribe to transcription results
+    buffer.subscribe(
+        on_transcription=lambda r: loop.call_soon_threadsafe(result_queue.put_nowait, r),
+        on_error=lambda e: print(f"Error: {e}")
+    )
+    
+    async def send_results():
+        while True:
+            result = await result_queue.get()
+            if result.text:
+                await websocket.send_json(
+                    WebSocketTranscription(text=result.text, is_final=True).model_dump()
+                )
+    
+    # Start result sender task
+    sender_task = asyncio.create_task(send_results())
     
     try:
         while True:
-            # Receive audio chunk
             data = await websocket.receive_bytes()
-            buffer.add_chunk(data)
+            buffer.add_chunk(data)  # Non-blocking, RxPY handles the rest
             
-            # Transcribe when buffer is ready
-            if buffer.is_ready():
-                audio = buffer.get_audio()
-                
-                # Run transcription in thread pool
-                result = await asyncio.to_thread(
-                    service.transcribe_audio_array,
-                    audio,
-                    "en"
-                )
-                
-                # Send result
-                if result.text:
-                    await websocket.send_json(
-                        WebSocketTranscription(
-                            text=result.text,
-                            is_final=True
-                        ).model_dump()
-                    )
-                    
     except WebSocketDisconnect:
-        # Process remaining audio
-        remaining = buffer.get_remaining()
-        if remaining is not None and len(remaining) > 8000:
-            result = await asyncio.to_thread(
-                service.transcribe_audio_array,
-                remaining,
-                "en"
-            )
-            if result.text:
-                try:
-                    await websocket.send_json(
-                        WebSocketTranscription(
-                            text=result.text,
-                            is_final=True
-                        ).model_dump()
-                    )
-                except:
-                    pass
-                    
+        buffer.complete()  # Flush remaining audio
+        
     except Exception as e:
-        await websocket.send_json(
-            WebSocketError(type="error", message=str(e)).model_dump()
-        )
+        await websocket.send_json(WebSocketError(type="error", message=str(e)).model_dump())
+        
+    finally:
+        sender_task.cancel()
+        buffer.dispose()
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -113,7 +99,7 @@ async def health(
     service: TranscriptionService = Depends(get_transcription_service)
 ):
     return HealthResponse(
-        status="ok",
+        status="ok" if service.is_model_loaded() else "not_initialized",
         model_loaded=service.is_model_loaded(),
-        model_size=service.model_size.value
+        model_size="api"  # Using remote STT API
     )
