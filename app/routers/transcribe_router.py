@@ -8,6 +8,7 @@ from app.schemas.transcribe_schema import (
     HealthResponse,
 )
 
+
 router = APIRouter(prefix="/api/v1", tags=["transcription"])
 
 # Service instance
@@ -52,7 +53,9 @@ async def websocket_transcribe(
         transcription_service=service,
         buffer_seconds=3.0,
         overlap_seconds=0.5,
-        language="en"
+        language="en",
+        vad_enabled=True, 
+        vad_threshold=0.5
     )
     
     # Queue for async communication between RxPY and asyncio

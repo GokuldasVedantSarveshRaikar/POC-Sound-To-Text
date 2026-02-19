@@ -24,7 +24,9 @@ from app.schemas.transcribe_schema import (
     TranscriptionResponse,
     TranscriptionSegment,
 )
-from app.services.vad import VoiceActivityDetector
+from app.services.silerovad import SileroVADService
+import torch
+
 
 # Load environment variables
 load_dotenv()
@@ -212,7 +214,6 @@ class StreamingBuffer:
     
     This class uses reactive streams to handle audio data flow,
     providing non-blocking transcription with automatic buffering.
-    Includes Voice Activity Detection (VAD) to reduce unnecessary API calls.
     """
     
     def __init__(
@@ -222,42 +223,26 @@ class StreamingBuffer:
         buffer_seconds: float = 3.0,
         overlap_seconds: float = 0.5,
         language: Optional[str] = None,
-        vad_enabled: bool = True,
-        vad_energy_threshold: float = 0.005,  # Lower threshold to catch quieter speech
-        vad_speech_ratio: float = 0.1  # Only 10% of frames need speech (more permissive)
+        vad_enabled: bool = True,  # Add VAD toggle
+        vad_threshold: float = 0.5  # Add VAD threshold
     ):
         """
         Initialize StreamingBuffer.
         
         Args:
-            transcription_service: Service for transcription (default: singleton)
-            sample_rate: Audio sample rate (default: 16000 Hz)
-            buffer_seconds: Seconds of audio to buffer before transcription
-            overlap_seconds: Seconds of overlap between chunks
-            language: Language code for transcription
-            vad_enabled: Enable Voice Activity Detection to skip silence
-            vad_energy_threshold: VAD energy threshold (0.0 to 1.0)
-            vad_speech_ratio: Minimum ratio of frames with speech (0.0 to 1.0)
+            vad_enabled: Enable or disable VAD filtering.
+            vad_threshold: Probability threshold for speech detection.
         """
         self.sample_rate = sample_rate
         self.buffer_seconds = buffer_seconds
         self.overlap_seconds = overlap_seconds
         self.language = language
+        self.vad_enabled = vad_enabled
         self._service = transcription_service or TranscriptionService.get_instance()
         
-        # Voice Activity Detection
-        self.vad_enabled = vad_enabled
-        self._vad = VoiceActivityDetector(
-            sample_rate=sample_rate,
-            energy_threshold=vad_energy_threshold,
-            speech_ratio_threshold=vad_speech_ratio,
-            adaptive=True
-        ) if vad_enabled else None
-        
-        # Statistics for monitoring
-        self._chunks_processed = 0
-        self._chunks_skipped_vad = 0
-        
+        # Initialize Silero VAD
+        self._vad = SileroVADService(threshold=vad_threshold) if vad_enabled else None
+
         # Internal buffer for accumulating audio
         self._buffer = np.array([], dtype=np.float32)
         
@@ -293,7 +278,7 @@ class StreamingBuffer:
         return self._error_output
     
     def _setup_pipeline(self) -> None:
-        """Setup the reactive audio processing pipeline with VAD."""
+        """Setup the reactive audio processing pipeline."""
         subscription = self._audio_input.pipe(
             # Convert bytes to numpy array
             ops.map(self._bytes_to_array),
@@ -305,8 +290,8 @@ class StreamingBuffer:
             ops.map(lambda _: self._extract_chunk()),
             # Filter out empty chunks
             ops.filter(lambda audio: audio is not None and len(audio) > 0),
-            # VAD: Only transcribe if speech is detected
-            ops.filter(self._check_vad),
+            # Apply VAD filtering if enabled
+            ops.filter(self._check_vad if self.vad_enabled else lambda _: True),
             # Transcribe on background thread (non-blocking)
             ops.observe_on(_pool_scheduler),
             ops.map(self._transcribe_chunk),
@@ -320,36 +305,6 @@ class StreamingBuffer:
         )
         
         self._disposables.add(subscription)
-    
-    def _check_vad(self, audio: np.ndarray) -> bool:
-        """Check if audio contains speech using VAD."""
-        self._chunks_processed += 1
-        
-        if not self.vad_enabled or self._vad is None:
-            return True
-        
-        has_speech = self._vad.is_speech(audio)
-        
-        if not has_speech:
-            self._chunks_skipped_vad += 1
-            logger.debug(
-                f"VAD: Skipping chunk (silence). "
-                f"Skipped: {self._chunks_skipped_vad}/{self._chunks_processed} "
-                f"({100 * self._chunks_skipped_vad / self._chunks_processed:.1f}%)"
-            )
-        
-        return has_speech
-    
-    def get_vad_stats(self) -> dict:
-        """Get VAD statistics."""
-        return {
-            "chunks_processed": self._chunks_processed,
-            "chunks_skipped": self._chunks_skipped_vad,
-            "skip_ratio": self._chunks_skipped_vad / self._chunks_processed 
-                if self._chunks_processed > 0 else 0,
-            "api_calls_saved_percent": 100 * self._chunks_skipped_vad / self._chunks_processed 
-                if self._chunks_processed > 0 else 0
-        }
     
     def _bytes_to_array(self, chunk: bytes) -> np.ndarray:
         """Convert raw bytes to float32 numpy array."""
@@ -459,19 +414,21 @@ class StreamingBuffer:
     
     def dispose(self) -> None:
         """Clean up all subscriptions and resources."""
-        # Log VAD statistics
-        if self.vad_enabled and self._chunks_processed > 0:
-            stats = self.get_vad_stats()
-            logger.info(
-                f"VAD Stats: {stats['chunks_skipped']}/{stats['chunks_processed']} "
-                f"chunks skipped ({stats['api_calls_saved_percent']:.1f}% API calls saved)"
-            )
-        
         self._disposables.dispose()
         self.clear()
+
+    def _check_vad(self, audio: np.ndarray) -> bool:
+        """
+        Check if the audio contains speech using VAD.
+
+        Args:
+            audio: Audio data as numpy array (float32, mono).
+
+        Returns:
+            True if speech is detected, False otherwise.
+        """
         
-        # Reset VAD if present
-        if self._vad:
-            self._vad.reset()
-        self._chunks_processed = 0
-        self._chunks_skipped_vad = 0
+        if self._vad is None:
+            return True  # If VAD is disabled, allow all audio
+        audio_tensor = torch.tensor(audio, dtype=torch.float32).to(self._vad.device)
+        return self._vad.is_speech(audio_tensor, self.sample_rate)
