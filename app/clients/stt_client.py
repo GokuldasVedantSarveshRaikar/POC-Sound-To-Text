@@ -246,19 +246,21 @@ class STTClient:
         }
 
         params = {"api-version": "2024-02-01"}
-        if language:
-            params["language"] = language
 
         logger.info("Transcribing file: %s (correlation_id: %s)", audio_file_path, correlation_id)
 
         try:
             with open(audio_file_path, "rb") as f:
                 files = {"file": (audio_path.name, f, self._get_mime_type(audio_path))}
+                data = {}
+                if language:
+                    data["language"] = language
                 
                 response = self._session.post(
                     self.api_url,
                     headers=headers,
                     files=files,
+                    data=data,
                     params=params,
                     timeout=self.timeout
                 )

@@ -177,12 +177,12 @@
         </div>
         
         <div class="controls">
-            <button id="connectBtn" class="primary" onclick="connect()">Connect</button>
-            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
-            <button id="startBtn" class="success" onclick="startRecording()" disabled>Start Recording</button>
-            <button id="stopBtn" class="danger" onclick="stopRecording()" disabled>Stop Recording</button>
-            <button onclick="clearLog()">Clear Log</button>
-            <button onclick="clearTranscription()">Clear Output</button>
+            <button id="connectBtn" class="primary">Connect</button>
+            <button id="disconnectBtn">Disconnect</button>
+            <button id="startBtn" class="success">Start Recording</button>
+            <button id="stopBtn" class="danger">Stop Recording</button>
+            <button id="clearLogBtn">Clear Log</button>
+            <button id="clearTranscriptionBtn">Clear Output</button>
         </div>
         
         <div class="panel">
@@ -209,14 +209,17 @@
     </div>
 
     <script>
-        let ws;
-        let audioContext;
-        let scriptProcessor;
-        let mediaStream;
+    (() => {
+        let ws = null;
+        let audioContext = null;
+        let scriptProcessor = null;
+        let mediaStream = null;
         let isRecording = false;
         let chunkCount = 0;
         let msgCount = 0;
-        
+        let fullTranscription = '';
+
+        // UI elements
         const log = document.getElementById('log');
         const transcription = document.getElementById('transcription');
         const statusBar = document.getElementById('statusBar');
@@ -227,9 +230,10 @@
         const stopBtn = document.getElementById('stopBtn');
         const chunkCountEl = document.getElementById('chunkCount');
         const msgCountEl = document.getElementById('msgCount');
-        
-        let fullTranscription = '';
-        
+        const clearLogBtn = document.getElementById('clearLogBtn');
+        const clearTranscriptionBtn = document.getElementById('clearTranscriptionBtn');
+        const endpointUrl = 'ws://localhost:9000/api/v1/ws/transcribe';
+
         function addLog(msg, type = 'info') {
             const time = new Date().toLocaleTimeString('en-US', { hour12: false });
             const line = document.createElement('div');
@@ -237,22 +241,22 @@
             log.appendChild(line);
             log.scrollTop = log.scrollHeight;
         }
-        
+
         function setStatus(text, className) {
             statusText.textContent = text.toUpperCase();
             statusBar.className = 'status-bar ' + className;
         }
-        
+
         function updateMetrics() {
             chunkCountEl.textContent = chunkCount;
             msgCountEl.textContent = msgCount;
         }
-        
+
         function clearLog() {
             log.innerHTML = '';
             addLog('Console cleared', 'info');
         }
-        
+
         function clearTranscription() {
             fullTranscription = '';
             transcription.textContent = '// transcribed text will appear here';
@@ -260,24 +264,38 @@
             msgCount = 0;
             updateMetrics();
         }
-        
+
+        function setButtonStates({connected, recording}) {
+            connectBtn.disabled = connected;
+            disconnectBtn.disabled = !connected;
+            startBtn.disabled = !connected || recording;
+            stopBtn.disabled = !connected || !recording;
+        }
+
         function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                addLog('Already connected.', 'info');
+                return;
+            }
             addLog('Connecting to websocket server...', 'info');
-            ws = new WebSocket('ws://localhost:9000/api/v1/ws/transcribe');
-            
+            ws = new WebSocket(endpointUrl);
+
             ws.onopen = () => {
                 addLog('Connection established', 'success');
                 setStatus('Connected', 'connected');
-                connectBtn.disabled = true;
-                disconnectBtn.disabled = false;
-                startBtn.disabled = false;
+                setButtonStates({connected: true, recording: false});
             };
-            
+
             ws.onmessage = (e) => {
                 msgCount++;
                 updateMetrics();
-                const data = JSON.parse(e.data);
-                
+                let data;
+                try {
+                    data = JSON.parse(e.data);
+                } catch (err) {
+                    addLog('Invalid JSON from server', 'error');
+                    return;
+                }
                 if (data.type === 'transcription' && data.text) {
                     addLog('Transcription received: "' + data.text + '"', 'data');
                     fullTranscription += data.text + ' ';
@@ -288,27 +306,27 @@
                     addLog('Server error: ' + data.message, 'error');
                 }
             };
-            
+
             ws.onerror = (e) => {
                 addLog('WebSocket error occurred', 'error');
                 setStatus('Error', 'disconnected');
             };
-            
+
             ws.onclose = (e) => {
                 addLog('Connection closed (code: ' + e.code + ')', 'info');
                 setStatus('Disconnected', 'disconnected');
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
-                startBtn.disabled = true;
-                stopBtn.disabled = true;
+                setButtonStates({connected: false, recording: false});
                 stopRecording();
             };
         }
-        
+
         async function startRecording() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('WebSocket not connected.', 'error');
+                return;
+            }
             try {
                 addLog('Requesting microphone access...', 'info');
-                
                 mediaStream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
                         sampleRate: 16000,
@@ -317,83 +335,76 @@
                         noiseSuppression: true
                     } 
                 });
-                
                 addLog('Microphone access granted', 'success');
-                
-                audioContext = new AudioContext({ sampleRate: 16000 });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
                 const source = audioContext.createMediaStreamSource(mediaStream);
-                
                 scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-                
                 scriptProcessor.onaudioprocess = (e) => {
-                    if (!isRecording || ws.readyState !== WebSocket.OPEN) return;
-                    
+                    if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
                     const inputData = e.inputBuffer.getChannelData(0);
-                    
                     const int16Data = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         const s = Math.max(-1, Math.min(1, inputData[i]));
                         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
-                    
                     ws.send(int16Data.buffer);
                     chunkCount++;
                     updateMetrics();
                 };
-                
                 source.connect(scriptProcessor);
                 scriptProcessor.connect(audioContext.destination);
-                
                 isRecording = true;
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
+                setButtonStates({connected: true, recording: true});
                 setStatus('Recording', 'recording');
                 addLog('Recording started - awaiting audio input', 'success');
-                
             } catch (err) {
                 addLog('Microphone error: ' + err.message, 'error');
             }
         }
-        
+
         function stopRecording() {
             isRecording = false;
-            
             if (scriptProcessor) {
                 scriptProcessor.disconnect();
                 scriptProcessor = null;
             }
-            
             if (audioContext) {
                 audioContext.close();
                 audioContext = null;
             }
-            
             if (mediaStream) {
                 mediaStream.getTracks().forEach(track => track.stop());
                 mediaStream = null;
             }
-            
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            
+            setButtonStates({connected: ws && ws.readyState === WebSocket.OPEN, recording: false});
             if (ws && ws.readyState === WebSocket.OPEN) {
                 setStatus('Connected', 'connected');
             }
-            
             addLog('Recording stopped', 'info');
         }
-        
+
         function disconnect() {
             stopRecording();
             if (ws) {
                 ws.close();
             }
         }
-        
-        window.onbeforeunload = () => {
-            disconnect();
-        };
-        
-        // Initial log
+
+        // Button event listeners
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
+        clearLogBtn.addEventListener('click', clearLog);
+        clearTranscriptionBtn.addEventListener('click', clearTranscription);
+
+        // Initial state
+        setButtonStates({connected: false, recording: false});
         addLog('Client initialized', 'info');
         addLog('Ready to connect to server', 'info');
+
+        window.addEventListener('beforeunload', () => {
+            disconnect();
+        });
+    })();
+    </script>

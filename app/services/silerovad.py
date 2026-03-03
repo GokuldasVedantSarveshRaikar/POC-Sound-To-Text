@@ -1,76 +1,74 @@
 import torch
-from silero_vad import get_speech_timestamps, load_silero_vad
-import soundfile as sf
-import numpy as np
+from silero_vad import get_speech_timestamps
+import threading
+
+
+
 
 class SileroVADService:
+    _shared_model = None
+    _shared_device = None
+    _load_lock = threading.Lock()
 
     def __init__(self, threshold: float = 0.5, min_speech_duration_ms: int = 250):
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Load the model without passing the 'device' argument
-        self.model = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad',
-            model='silero_vad',
-            force_reload=True,
-            skip_validation=True
-        )[0]
-        
-        # Move the model to the appropriate device
-        self.model = self.model.to(self.device)
-        
+        self.model, self.device = self._get_shared_model_and_device()
         self.threshold = threshold
         self.min_speech_duration_ms = min_speech_duration_ms
 
+    @classmethod
+    def _get_shared_model_and_device(cls):
+        if cls._shared_model is not None and cls._shared_device is not None:
+            return cls._shared_model, cls._shared_device
+
+        with cls._load_lock:
+            if cls._shared_model is None or cls._shared_device is None:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                model = torch.hub.load(
+                    repo_or_dir='snakers4/silero-vad',
+                    model='silero_vad',
+                    force_reload=False,
+                    skip_validation=True
+                )[0]
+                model = model.to(device)
+                model.eval()
+
+                cls._shared_model = model
+                cls._shared_device = device
+
+        return cls._shared_model, cls._shared_device
+
     def is_speech(self, audio: torch.Tensor, sample_rate: int) -> bool:
-        """Detect if the given audio contains speech."""
+        """Robust speech decision for noisy chunks."""
         try:
-            # Move audio to the same device as the model
-            audio = audio.to(self.device)
-            
-            # Get speech timestamps
+            audio = audio.to(self.device).float().flatten()
+
             timestamps = get_speech_timestamps(
                 audio,
                 self.model,
                 sampling_rate=sample_rate,
-                threshold=self.threshold,
-                min_speech_duration_ms=self.min_speech_duration_ms
+                threshold=self.threshold,                 # try 0.8-0.9 in noisy rooms
+                min_speech_duration_ms=self.min_speech_duration_ms,
+                min_silence_duration_ms=120,
+                speech_pad_ms=30,
+                return_seconds=False                      # start/end in samples
             )
-            
-            # Check if speech is detected
-            return len(timestamps) > 0 and (timestamps[-1]['end'] - timestamps[0]['start']) >= self.min_speech_duration_ms
+
+            if not timestamps:
+                return False
+
+            total_samples = int(audio.numel())
+            min_samples = int(sample_rate * self.min_speech_duration_ms / 1000)
+
+            speech_samples = sum(seg["end"] - seg["start"] for seg in timestamps)
+            longest_segment = max(seg["end"] - seg["start"] for seg in timestamps)
+            speech_ratio = speech_samples / max(total_samples, 1)
+
+            # Tune these on your environment
+            return longest_segment >= min_samples and speech_ratio >= 0.08
+
         except Exception as e:
             print(f"Error during VAD processing: {e}")
             return False
 
 
-def main():
-    # Initialize the Silero VAD service
-    vad_service = SileroVADService(threshold=0.5, min_speech_duration_ms=250)
 
-    # Path to the audio file (ensure it's 16kHz mono)
-    audio_file_path = "recording.wav"
-
-    # Read the audio file
-    audio, sample_rate = sf.read(audio_file_path, dtype="float32")
-    
-    # Convert to mono if the audio is stereo
-    if len(audio.shape) > 1:
-        audio = np.mean(audio, axis=1)
-    
-    # Convert the audio to a PyTorch tensor
-    audio_tensor = torch.tensor(audio, dtype=torch.float32)
-
-    # Check if the audio contains speech
-    is_speech_detected = vad_service.is_speech(audio_tensor, sample_rate)
-
-    # Print the result
-    if is_speech_detected:
-        print("Speech detected in the audio.")
-    else:
-        print("No speech detected in the audio.")
-
-
-
-if __name__ == "__main__":
-    main()

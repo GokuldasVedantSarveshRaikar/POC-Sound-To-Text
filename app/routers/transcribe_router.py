@@ -55,7 +55,9 @@ async def websocket_transcribe(
         overlap_seconds=0.5,
         language="en",
         vad_enabled=True, 
-        vad_threshold=0.5
+        vad_threshold=0.5,
+        noise_reduce_enabled=True,
+        noise_reduce_strength=1.0,
     )
     
     # Queue for async communication between RxPY and asyncio

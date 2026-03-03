@@ -25,6 +25,7 @@ from app.schemas.transcribe_schema import (
     TranscriptionSegment,
 )
 from app.services.silerovad import SileroVADService
+from app.services.noisereduce import SpectralNoiseReducer
 import torch
 
 
@@ -42,6 +43,7 @@ class TranscriptionService:
     """Service for handling audio transcription using Philips AI STT API."""
     
     _instance: Optional["TranscriptionService"] = None
+    DEFAULT_LANGUAGE = "en"
     
     def __init__(self):
         self.sample_rate = 16000
@@ -84,7 +86,7 @@ class TranscriptionService:
     def transcribe_audio_array(
         self,
         audio: np.ndarray,
-        language: Optional[str] = None
+        language: Optional[str] = DEFAULT_LANGUAGE
     ) -> TranscriptionResponse:
         """
         Transcribe audio from numpy array by saving to temp file and calling API.
@@ -98,6 +100,8 @@ class TranscriptionService:
         """
         if not self.is_model_loaded():
             self.load_model()
+
+        effective_language = language or self.DEFAULT_LANGUAGE
         
         # Ensure correct dtype
         audio = audio.astype(np.float32)
@@ -109,7 +113,7 @@ class TranscriptionService:
         
         try:
             # Call STT API
-            result = self._client.transcribe(tmp_path, language=language)
+            result = self._client.transcribe(tmp_path, language=effective_language)
             
             # Parse response - API returns {"text": "..."}
             text = result.get("text", "").strip()
@@ -128,7 +132,7 @@ class TranscriptionService:
             
             return TranscriptionResponse(
                 text=text,
-                language=language or "auto",
+                language=effective_language,
                 segments=segments,
                 duration=duration
             )
@@ -140,7 +144,7 @@ class TranscriptionService:
     def transcribe_bytes(
         self,
         audio_bytes: bytes,
-        language: Optional[str] = None
+        language: Optional[str] = DEFAULT_LANGUAGE
     ) -> TranscriptionResponse:
         """
         Transcribe audio from raw bytes (16-bit PCM, 16kHz, mono).
@@ -159,7 +163,7 @@ class TranscriptionService:
     def transcribe_file(
         self,
         file_path: str,
-        language: Optional[str] = None
+        language: Optional[str] = DEFAULT_LANGUAGE
     ) -> TranscriptionResponse:
         """
         Transcribe audio from file.
@@ -176,9 +180,11 @@ class TranscriptionService:
         
         if not self.is_model_loaded():
             self.load_model()
+
+        effective_language = language or self.DEFAULT_LANGUAGE
         
         # Call STT API directly with the file
-        result = self._client.transcribe(file_path, language=language)
+        result = self._client.transcribe(file_path, language=effective_language)
         
         # Parse response
         text = result.get("text", "").strip()
@@ -202,7 +208,7 @@ class TranscriptionService:
         
         return TranscriptionResponse(
             text=text,
-            language=language or "auto",
+            language=effective_language,
             segments=segments,
             duration=duration
         )
@@ -222,9 +228,11 @@ class StreamingBuffer:
         sample_rate: int = 16000,
         buffer_seconds: float = 3.0,
         overlap_seconds: float = 0.5,
-        language: Optional[str] = None,
+        language: Optional[str] = TranscriptionService.DEFAULT_LANGUAGE,
         vad_enabled: bool = True,  # Add VAD toggle
-        vad_threshold: float = 0.5  # Add VAD threshold
+        vad_threshold: float = 0.5,  # Add VAD threshold
+        noise_reduce_enabled: bool = True,  # Add noise reduction toggle
+        noise_reduce_strength: float = 0.35  # Add noise reduction strength
     ):
         """
         Initialize StreamingBuffer.
@@ -236,12 +244,18 @@ class StreamingBuffer:
         self.sample_rate = sample_rate
         self.buffer_seconds = buffer_seconds
         self.overlap_seconds = overlap_seconds
-        self.language = language
+        self.language = language or TranscriptionService.DEFAULT_LANGUAGE
         self.vad_enabled = vad_enabled
+        self.noise_reduce_enabled = noise_reduce_enabled
         self._service = transcription_service or TranscriptionService.get_instance()
         
         # Initialize Silero VAD
         self._vad = SileroVADService(threshold=vad_threshold) if vad_enabled else None
+        self._noise_reducer = (
+            SpectralNoiseReducer(sample_rate=sample_rate, prop_decrease=noise_reduce_strength)
+            if noise_reduce_enabled
+            else None
+        )
 
         # Internal buffer for accumulating audio
         self._buffer = np.array([], dtype=np.float32)
@@ -290,6 +304,8 @@ class StreamingBuffer:
             ops.map(lambda _: self._extract_chunk()),
             # Filter out empty chunks
             ops.filter(lambda audio: audio is not None and len(audio) > 0),
+            # Apply noise reduction on full chunks (more stable than per-packet)
+            ops.map(self._apply_noise_reduction),
             # Apply VAD filtering if enabled
             ops.filter(self._check_vad if self.vad_enabled else lambda _: True),
             # Transcribe on background thread (non-blocking)
@@ -313,6 +329,25 @@ class StreamingBuffer:
     def _accumulate_buffer(self, audio: np.ndarray) -> None:
         """Add audio to the internal buffer."""
         self._buffer = np.append(self._buffer, audio)
+
+    def _apply_noise_reduction(self, audio: np.ndarray) -> np.ndarray:
+        """Apply spectral noise reduction to audio chunks when enabled."""
+        if not self.noise_reduce_enabled or self._noise_reducer is None:
+            return audio
+        try:
+            enhanced = self._noise_reducer.denoise_array(audio)
+
+            # Guardrail: if denoising suppresses too much signal energy, keep original
+            in_rms = float(np.sqrt(np.mean(np.square(audio))) + 1e-12)
+            out_rms = float(np.sqrt(np.mean(np.square(enhanced))) + 1e-12)
+            if out_rms < 0.25 * in_rms:
+                logger.warning("Noise reduction suppressed signal too strongly; using raw audio")
+                return audio
+
+            return enhanced
+        except Exception as e:
+            logger.warning(f"Noise reduction failed, using raw audio: {e}")
+            return audio
     
     def _is_buffer_ready(self) -> bool:
         """Check if buffer has enough samples for transcription."""
