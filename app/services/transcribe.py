@@ -18,6 +18,7 @@ from reactivex import operators as ops
 from reactivex.subject import Subject
 from reactivex.scheduler import ThreadPoolScheduler
 from reactivex.disposable import CompositeDisposable
+from langdetect import detect, LangDetectException
 
 from app.clients import STTClient, STTClientError
 from app.schemas.transcribe_schema import (
@@ -83,6 +84,31 @@ class TranscriptionService:
             self.load_model()
         return self._client.health_check()
     
+    def _filter_english_text(self, text: str) -> str:
+        """
+        Filter text to only include English content.
+        
+        Args:
+            text: The transcribed text
+            
+        Returns:
+            The text if it's detected as English, otherwise empty string
+        """
+        if not text.strip():
+            return text
+            
+        try:
+            detected_lang = detect(text)
+            if detected_lang == 'en':
+                return text
+            else:
+                logger.info(f"Detected non-English language '{detected_lang}', ignoring transcription: {text[:50]}...")
+                return ""
+        except LangDetectException:
+            # If language detection fails, assume it's not English and ignore
+            logger.warning(f"Could not detect language for text, ignoring: {text[:50]}...")
+            return ""
+    
     def transcribe_audio_array(
         self,
         audio: np.ndarray,
@@ -117,6 +143,9 @@ class TranscriptionService:
             
             # Parse response - API returns {"text": "..."}
             text = result.get("text", "").strip()
+            
+            # Filter to English only
+            text = self._filter_english_text(text)
             
             # Build response (API doesn't return segments, so we create a single segment)
             duration = len(audio) / self.sample_rate
@@ -189,6 +218,9 @@ class TranscriptionService:
         # Parse response
         text = result.get("text", "").strip()
         
+        # Filter to English only
+        text = self._filter_english_text(text)
+        
         # Load audio to get duration
         audio, sample_rate = sf.read(file_path, dtype='float32')
         if len(audio.shape) > 1:
@@ -226,24 +258,31 @@ class StreamingBuffer:
         self,
         transcription_service: Optional[TranscriptionService] = None,
         sample_rate: int = 16000,
-        buffer_seconds: float = 3.0,
-        overlap_seconds: float = 0.5,
+        chunk_duration_ms: int = 100,
+        overlap_ms: int = 0,
         language: Optional[str] = TranscriptionService.DEFAULT_LANGUAGE,
-        vad_enabled: bool = True,  # Add VAD toggle
-        vad_threshold: float = 0.5,  # Add VAD threshold
-        noise_reduce_enabled: bool = True,  # Add noise reduction toggle
-        noise_reduce_strength: float = 0.35  # Add noise reduction strength
+        vad_enabled: bool = True,
+        vad_threshold: float = 0.3,
+        noise_reduce_enabled: bool = True,
+        noise_reduce_strength: float = 0.5
     ):
         """
-        Initialize StreamingBuffer.
+        Initialize StreamingBuffer for real-time STT with 100 ms chunks.
         
         Args:
-            vad_enabled: Enable or disable VAD filtering.
-            vad_threshold: Probability threshold for speech detection.
+            transcription_service: STT service instance
+            sample_rate: Audio sample rate in Hz (default 16000)
+            chunk_duration_ms: Duration of each audio chunk in milliseconds (default 100)
+            overlap_ms: Overlap between chunks in milliseconds (default 0)
+            language: Language code for transcription
+            vad_enabled: Enable or disable Voice Activity Detection
+            vad_threshold: VAD probability threshold (0-1, default 0.3 = 30% confidence)
+            noise_reduce_enabled: Enable or disable noise reduction
+            noise_reduce_strength: Noise reduction strength (0-1, default 0.5 = moderate)
         """
         self.sample_rate = sample_rate
-        self.buffer_seconds = buffer_seconds
-        self.overlap_seconds = overlap_seconds
+        self.chunk_duration_ms = chunk_duration_ms
+        self.overlap_ms = overlap_ms
         self.language = language or TranscriptionService.DEFAULT_LANGUAGE
         self.vad_enabled = vad_enabled
         self.noise_reduce_enabled = noise_reduce_enabled
@@ -268,18 +307,24 @@ class StreamingBuffer:
         # Track subscriptions for cleanup
         self._disposables = CompositeDisposable()
         
+        logger.info(
+            f"StreamingBuffer initialized for real-time STT: "
+            f"chunk_duration={chunk_duration_ms}ms ({self.samples_needed} samples), "
+            f"sample_rate={sample_rate}Hz, overlap={overlap_ms}ms"
+        )
+        
         # Setup reactive pipeline
         self._setup_pipeline()
         
     @property
     def samples_needed(self) -> int:
-        """Number of samples needed before transcription."""
-        return int(self.sample_rate * self.buffer_seconds)
+        """Number of samples needed before transcription (100 ms chunks)."""
+        return int((self.chunk_duration_ms / 1000.0) * self.sample_rate)
     
     @property
     def overlap_samples(self) -> int:
         """Number of samples to keep for overlap."""
-        return int(self.sample_rate * self.overlap_seconds)
+        return int((self.overlap_ms / 1000.0) * self.sample_rate)
     
     @property
     def transcriptions(self) -> Subject[TranscriptionResponse]:
@@ -338,10 +383,15 @@ class StreamingBuffer:
             enhanced = self._noise_reducer.denoise_array(audio)
 
             # Guardrail: if denoising suppresses too much signal energy, keep original
+            # Use absolute threshold instead of ratio to avoid issues with quiet audio
             in_rms = float(np.sqrt(np.mean(np.square(audio))) + 1e-12)
             out_rms = float(np.sqrt(np.mean(np.square(enhanced))) + 1e-12)
-            if out_rms < 0.25 * in_rms:
-                logger.warning("Noise reduction suppressed signal too strongly; using raw audio")
+            
+            # Only reject if BOTH conditions are true:
+            # 1. Output is much weaker than input (< 30% signal retention)
+            # 2. Input signal was actually strong enough to matter
+            if in_rms > 0.01 and out_rms < 0.3 * in_rms:
+                logger.warning(f"Noise reduction too aggressive (in_rms={in_rms:.4f}, out_rms={out_rms:.4f}); using raw audio")
                 return audio
 
             return enhanced

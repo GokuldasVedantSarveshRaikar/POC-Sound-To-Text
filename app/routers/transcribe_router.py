@@ -49,15 +49,16 @@ async def websocket_transcribe(
     )
     
     # Create buffer with service injection
+    # 200 ms chunks = optimal for real-time STT (Deepgram recommendations)
     buffer = StreamingBuffer(
         transcription_service=service,
-        buffer_seconds=3.0,
-        overlap_seconds=0.5,
-        language="en",
+        chunk_duration_ms=3000,  # 200 ms chunks for real-time STT
+        overlap_ms=100,           # No overlap needed
+        language="en",          # Set language for better accuracy
         vad_enabled=True, 
-        vad_threshold=0.5,
+        vad_threshold=0.3,      # Lower threshold (30%) = more lenient speech detection
         noise_reduce_enabled=True,
-        noise_reduce_strength=1.0,
+        noise_reduce_strength=0.2,  # Moderate noise reduction (0.5 = balanced)
     )
     
     # Queue for async communication between RxPY and asyncio

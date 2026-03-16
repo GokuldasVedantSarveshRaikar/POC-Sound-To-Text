@@ -216,7 +216,7 @@ class STTClient:
         Args:
             audio_file_path: Path to the audio file (mp3, wav, etc.)
             correlation_id: Optional correlation ID for request tracking.
-            language: Optional language hint for transcription.
+            language: Optional language hint for transcription (must be "en" for English; others are not supported).
 
         Returns:
             Transcription response as dict containing the transcribed text.
@@ -224,6 +224,7 @@ class STTClient:
         Raises:
             STTTranscriptionError: If transcription fails.
             FileNotFoundError: If audio file does not exist.
+            ValueError: If an unsupported language is specified.
         """
         # Validate file exists
         audio_path = Path(audio_file_path)
@@ -233,6 +234,10 @@ class STTClient:
         if not audio_path.is_file():
             raise STTTranscriptionError(f"Path is not a file: {audio_file_path}")
 
+        # Strictly enforce English transcription
+        if language is not None and language != "en":
+            raise ValueError("Only English ('en') transcription is supported. Please omit the language parameter or set it to 'en'.")
+        
         token = self._get_token()
         
         # Generate correlation ID if not provided
@@ -252,9 +257,7 @@ class STTClient:
         try:
             with open(audio_file_path, "rb") as f:
                 files = {"file": (audio_path.name, f, self._get_mime_type(audio_path))}
-                data = {}
-                if language:
-                    data["language"] = language
+                data = {"language": "en"}  # Always use English
                 
                 response = self._session.post(
                     self.api_url,
