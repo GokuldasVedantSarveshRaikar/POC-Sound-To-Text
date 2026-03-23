@@ -3,8 +3,6 @@ from silero_vad import get_speech_timestamps
 import threading
 
 
-
-
 class SileroVADService:
     _shared_model = None
     _shared_device = None
@@ -22,12 +20,12 @@ class SileroVADService:
 
         with cls._load_lock:
             if cls._shared_model is None or cls._shared_device is None:
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 model = torch.hub.load(
-                    repo_or_dir='snakers4/silero-vad',
-                    model='silero_vad',
+                    repo_or_dir="snakers4/silero-vad",
+                    model="silero_vad",
                     force_reload=False,
-                    skip_validation=True
+                    skip_validation=True,
                 )[0]
                 model = model.to(device)
                 model.eval()
@@ -46,11 +44,11 @@ class SileroVADService:
                 audio,
                 self.model,
                 sampling_rate=sample_rate,
-                threshold=self.threshold,                 # try 0.8-0.9 in noisy rooms
+                threshold=self.threshold,  # try 0.8-0.9 in noisy rooms
                 min_speech_duration_ms=self.min_speech_duration_ms,
                 min_silence_duration_ms=120,
                 speech_pad_ms=30,
-                return_seconds=False                      # start/end in samples
+                return_seconds=False,  # start/end in samples
             )
 
             if not timestamps:
@@ -69,6 +67,3 @@ class SileroVADService:
         except Exception as e:
             print(f"Error during VAD processing: {e}")
             return False
-
-
-

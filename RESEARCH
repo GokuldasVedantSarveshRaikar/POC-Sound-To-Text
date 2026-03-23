@@ -1,4 +1,14 @@
-silerio VAD - https://github.com/snakers4/silero-vad
-noise reduction - https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=1164453
+# Legacy Research Index
+
+This file is kept for backward compatibility.
+
+Primary research documents:
+- docs/research/README.md
+- docs/research/silero-vad-research.md
+- docs/research/noise-reduction-research.md
+
+Original source links:
+- Silero VAD: https://github.com/snakers4/silero-vad
+- Noise reduction: https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=1164453
 
 

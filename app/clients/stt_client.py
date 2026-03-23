@@ -22,35 +22,39 @@ logger = logging.getLogger(__name__)
 
 class STTClientError(Exception):
     """Base exception for STT Client errors."""
+
     pass
 
 
 class STTAuthenticationError(STTClientError):
     """Raised when authentication fails."""
+
     pass
 
 
 class STTTranscriptionError(STTClientError):
     """Raised when transcription fails."""
+
     pass
 
 
 class STTConfigurationError(STTClientError):
     """Raised when configuration is invalid."""
+
     pass
 
 
 class STTClient:
     """
     Client for Philips AI Model Serving STT API with token caching.
-    
+
     This client provides:
     - Automatic JWT token management with caching
     - Thread-safe token refresh
     - Configurable retry logic for transient failures
     - Request timeouts
     - Connection pooling
-    
+
     Example:
         >>> from dotenv import load_dotenv
         >>> load_dotenv()
@@ -75,11 +79,11 @@ class STTClient:
         host_url: Optional[str] = None,
         timeout: int = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        token_buffer_seconds: int = DEFAULT_TOKEN_BUFFER
+        token_buffer_seconds: int = DEFAULT_TOKEN_BUFFER,
     ):
         """
         Initialize the STT Client.
-        
+
         Args:
             client_id: Azure AD application client ID. Falls back to AZURE_CLIENT_ID env var.
             client_secret: Azure AD application client secret. Falls back to AZURE_CLIENT_SECRET env var.
@@ -89,16 +93,20 @@ class STTClient:
             timeout: Request timeout in seconds.
             max_retries: Maximum number of retries for transient failures.
             token_buffer_seconds: Seconds before token expiry to refresh.
-            
+
         Raises:
             STTConfigurationError: If required credentials are missing.
         """
         # Load from environment variables if not provided
         self.client_id = client_id or os.getenv("AZURE_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("AZURE_CLIENT_SECRET")
-        self.tenant_id = tenant_id or os.getenv("AZURE_TENANT_ID", self.DEFAULT_TENANT_ID)
+        self.tenant_id = tenant_id or os.getenv(
+            "AZURE_TENANT_ID", self.DEFAULT_TENANT_ID
+        )
         self.scope = scope or os.getenv("STT_API_SCOPE", self.DEFAULT_SCOPE)
-        self.host_url = (host_url or os.getenv("STT_API_HOST_URL", self.DEFAULT_HOST_URL)).rstrip("/")
+        self.host_url = (
+            host_url or os.getenv("STT_API_HOST_URL", self.DEFAULT_HOST_URL)
+        ).rstrip("/")
         self.timeout = timeout
         self.token_buffer_seconds = token_buffer_seconds
 
@@ -109,7 +117,9 @@ class STTClient:
                 "Set AZURE_CLIENT_ID and AZURE_CLIENT_SECRET environment variables or pass them as arguments."
             )
 
-        self.token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        self.token_url = (
+            f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        )
         self.api_url = f"{self.host_url}/philips-ai-modelserving-api/v1/ai/openai/deployments/gpt-4o-mini-transcribe/audio/transcriptions"
 
         # Token cache with thread safety
@@ -119,30 +129,28 @@ class STTClient:
 
         # Create session with retry logic and connection pooling
         self._session = self._create_session(max_retries)
-        
+
         logger.info("STT Client initialized for host: %s", self.host_url)
 
     def _create_session(self, max_retries: int) -> requests.Session:
         """Create a requests session with retry logic and connection pooling."""
         session = requests.Session()
-        
+
         retry_strategy = Retry(
             total=max_retries,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST", "GET"],
-            raise_on_status=False
+            raise_on_status=False,
         )
-        
+
         adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=10,
-            pool_maxsize=10
+            max_retries=retry_strategy, pool_connections=10, pool_maxsize=10
         )
-        
+
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-        
+
         return session
 
     def _is_token_valid(self) -> bool:
@@ -154,10 +162,10 @@ class STTClient:
     def _get_token(self) -> str:
         """
         Get JWT token, using cache if valid. Thread-safe.
-        
+
         Returns:
             Valid JWT access token.
-            
+
         Raises:
             STTAuthenticationError: If token acquisition fails.
         """
@@ -167,24 +175,22 @@ class STTClient:
                 return self._cached_token
 
             logger.info("Requesting new access token")
-            
+
             data = {
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
-                "scope": self.scope
+                "scope": self.scope,
             }
 
             try:
-                response = self._session.post(
-                    self.token_url,
-                    data=data,
-                    timeout=30
-                )
+                response = self._session.post(self.token_url, data=data, timeout=30)
                 response.raise_for_status()
             except requests.exceptions.RequestException as e:
                 logger.error("Failed to acquire token: %s", str(e))
-                raise STTAuthenticationError(f"Failed to acquire access token: {e}") from e
+                raise STTAuthenticationError(
+                    f"Failed to acquire access token: {e}"
+                ) from e
 
             try:
                 token_data = response.json()
@@ -195,11 +201,17 @@ class STTClient:
 
             # Decode token to get expiry
             try:
-                decoded = jwt.decode(self._cached_token, options={"verify_signature": False})
+                decoded = jwt.decode(
+                    self._cached_token, options={"verify_signature": False}
+                )
                 self._token_expiry = decoded.get("exp", time.time() + 3600)
-                logger.info("Token acquired, expires at %s", time.ctime(self._token_expiry))
+                logger.info(
+                    "Token acquired, expires at %s", time.ctime(self._token_expiry)
+                )
             except jwt.DecodeError as e:
-                logger.warning("Could not decode token expiry, using default: %s", str(e))
+                logger.warning(
+                    "Could not decode token expiry, using default: %s", str(e)
+                )
                 self._token_expiry = time.time() + 3600
 
             return self._cached_token
@@ -208,7 +220,7 @@ class STTClient:
         self,
         audio_file_path: str,
         correlation_id: Optional[str] = None,
-        language: Optional[str] = None
+        language: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Transcribe an audio file.
@@ -220,7 +232,7 @@ class STTClient:
 
         Returns:
             Transcription response as dict containing the transcribed text.
-            
+
         Raises:
             STTTranscriptionError: If transcription fails.
             FileNotFoundError: If audio file does not exist.
@@ -230,16 +242,18 @@ class STTClient:
         audio_path = Path(audio_file_path)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
-        
+
         if not audio_path.is_file():
             raise STTTranscriptionError(f"Path is not a file: {audio_file_path}")
 
         # Strictly enforce English transcription
         if language is not None and language != "en":
-            raise ValueError("Only English ('en') transcription is supported. Please omit the language parameter or set it to 'en'.")
-        
+            raise ValueError(
+                "Only English ('en') transcription is supported. Please omit the language parameter or set it to 'en'."
+            )
+
         token = self._get_token()
-        
+
         # Generate correlation ID if not provided
         if correlation_id is None:
             correlation_id = f"stt-{int(time.time() * 1000)}"
@@ -247,32 +261,38 @@ class STTClient:
         headers = {
             "Authorization": f"Bearer {token}",
             "correlation-id": correlation_id,
-            "Accept": "application/json"
+            "Accept": "application/json",
         }
 
         params = {"api-version": "2024-02-01"}
 
-        logger.info("Transcribing file: %s (correlation_id: %s)", audio_file_path, correlation_id)
+        logger.info(
+            "Transcribing file: %s (correlation_id: %s)",
+            audio_file_path,
+            correlation_id,
+        )
 
         try:
             with open(audio_file_path, "rb") as f:
                 files = {"file": (audio_path.name, f, self._get_mime_type(audio_path))}
                 data = {"language": "en"}  # Always use English
-                
+
                 response = self._session.post(
                     self.api_url,
                     headers=headers,
                     files=files,
                     data=data,
                     params=params,
-                    timeout=self.timeout
+                    timeout=self.timeout,
                 )
         except IOError as e:
             logger.error("Failed to read audio file: %s", str(e))
             raise STTTranscriptionError(f"Failed to read audio file: {e}") from e
         except requests.exceptions.Timeout as e:
             logger.error("Request timeout: %s", str(e))
-            raise STTTranscriptionError(f"Request timeout after {self.timeout}s: {e}") from e
+            raise STTTranscriptionError(
+                f"Request timeout after {self.timeout}s: {e}"
+            ) from e
         except requests.exceptions.RequestException as e:
             logger.error("Request failed: %s", str(e))
             raise STTTranscriptionError(f"Transcription request failed: {e}") from e
@@ -320,7 +340,7 @@ class STTClient:
     def health_check(self) -> bool:
         """
         Check if the client can authenticate successfully.
-        
+
         Returns:
             True if authentication succeeds, False otherwise.
         """
@@ -346,4 +366,3 @@ class STTClient:
     def __repr__(self) -> str:
         """String representation of the client."""
         return f"STTClient(host_url={self.host_url!r}, tenant_id={self.tenant_id!r})"
-

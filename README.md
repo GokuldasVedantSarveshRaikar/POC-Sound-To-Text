@@ -18,6 +18,12 @@ python -m app.main --port 9000
 - Health: `http://localhost:9000/api/v1/health`
 - Docs: `http://localhost:9000/docs`
 
+## Documentation
+
+- Technical architecture: `docs/TECHNICAL_ARCHITECTURE.md`
+- Research index: `docs/research/README.md`
+- Legacy research note: `RESEARCH`
+
 ## Philips AI STT Client
 
 The client provides access to the Philips AI Model Serving STT API with automatic JWT token caching.
