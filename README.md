@@ -90,9 +90,9 @@ All configuration is loaded from the `.env` file:
 |----------|----------|---------|-------------|
 | `AZURE_CLIENT_ID` | Yes | - | Azure AD application client ID |
 | `AZURE_CLIENT_SECRET` | Yes | - | Azure AD application client secret |
-| `AZURE_TENANT_ID` | No | Philips tenant | Azure AD tenant ID |
-| `STT_API_HOST_URL` | No | dev.api.it.philips.com | API host URL |
-| `STT_API_SCOPE` | No | Philips STT scope | API scope |
+| `AZURE_TENANT_ID` | No | - | Azure AD tenant ID |
+| `STT_API_HOST_URL` | No |  - | API host URL |
+| `STT_API_SCOPE` | No | - | API scope |
 
 ### Advanced Configuration
 
