@@ -124,6 +124,26 @@ flowchart TD
 - Encapsulates streaming transformations as composable operators.
 - Supports non-blocking fan-out of transcription events.
 
+### 5.1 How RxPY Helps in Future Roadmap
+
+RxPY gives this architecture a scalable stream-processing foundation as requirements grow.
+
+- Stage extensibility:
+    New steps like profanity filtering, keyword spotting, PII masking, sentiment scoring, and confidence gating can be added as additional operators without rewriting the full control flow.
+- Multi-output fan-out:
+    A single input stream can feed multiple consumers, such as live transcript UI, analytics pipeline, audit logs, and quality monitoring.
+- Policy-driven behavior:
+    Different customer profiles can use different operator chains, for example strict VAD for noisy call centers versus relaxed VAD for clinical dictation.
+- Resilience controls:
+    Stream-level timeout, retry, fallback, and error channels can be composed per stage, improving graceful degradation under upstream API instability.
+- Observability alignment:
+    Operators provide natural instrumentation boundaries for per-stage latency, drop rate, and throughput metrics.
+- Incremental feature rollout:
+    New processing stages can be introduced behind flags and evaluated with canary traffic before broad rollout.
+
+Trade-off note:
+RxPY should be retained when stream composition and branching complexity increases. If the pipeline remains strictly linear and simple, an asyncio queue model may be operationally simpler.
+
 ## 6. Concurrency and Threading Model
 
 The design uses two cooperating concurrency domains:
@@ -142,24 +162,26 @@ Bridge pattern:
 
 This prevents STT network latency from blocking inbound audio ingestion.
 
-## 7. STT Client and Authentication Strategy
+## 7. Outbound STT API Authentication and Resilience
 
-The STT client is production-oriented and includes:
-- Azure AD client credentials flow.
+This section describes authentication used by this service when calling Philips STT API (service-to-service), not client authentication on this service endpoints.
+
+Current outbound strategy includes:
+- Azure AD OAuth2 client-credentials flow for access token retrieval.
 - Token caching with expiry tracking from JWT payload.
 - Thread-safe token refresh via lock.
 - Retry strategy for transient HTTP failures (429/5xx).
-- Connection pooling via a shared `requests.Session`.
+- Connection pooling via a shared requests.Session.
 - One-time retry on 401 by clearing token cache.
 
 ```mermaid
 flowchart LR
-    A[Need token] --> B{Cached token valid?}
+    A[Need outbound token] --> B{Cached token valid?}
     B -- yes --> C[Use cached token]
-    B -- no --> D[Acquire new token]
+    B -- no --> D[Acquire token from Azure AD]
     D --> E[Decode JWT exp]
     E --> F[Cache token and expiry]
-    C --> G[Call STT API]
+    C --> G[Call Philips STT API]
     F --> G
     G --> H{401?}
     H -- yes --> I[Clear cache and retry once]
@@ -179,6 +201,12 @@ flowchart LR
 - Applies timestamp-based speech detection with configurable threshold and minimum speech duration.
 - Filters non-speech chunks to reduce unnecessary STT API calls.
 
+### 8.3 Language Detection and Filtering (LangDetect)
+- Uses langdetect for post-transcription language detection.
+- Keeps English-only output by dropping non-English transcript text before emission.
+- Provides an additional guardrail when upstream language hinting is inconsistent.
+- Language detection failures are treated conservatively and the segment is filtered out.
+
 ## 9. Data Contracts
 
 WebSocket messages are strongly typed using Pydantic models:
@@ -196,13 +224,14 @@ Primary dependencies include:
 - requests and PyJWT for API transport and token handling.
 - torch and silero-vad for speech gating.
 - scipy and numpy for DSP and denoising primitives.
+- langdetect for post-transcription language filtering.
 
 Environment variables:
 - `AZURE_CLIENT_ID`
 - `AZURE_CLIENT_SECRET`
-- `AZURE_TENANT_ID` (optional)
-- `STT_API_HOST_URL` (optional)
-- `STT_API_SCOPE` (optional)
+- `AZURE_TENANT_ID` 
+- `STT_API_HOST_URL` 
+- `STT_API_SCOPE` 
 
 ## 11. Operational Considerations
 
@@ -229,9 +258,3 @@ Environment variables:
 - `noise_reduce_strength` and gain floor: controls denoise aggressiveness.
 - thread pool size: controls parallelism and CPU usage.
 
-## 13. Suggested Future Improvements
-
-- Add per-stage latency metrics and structured tracing.
-- Add bounded queue policy and backpressure telemetry.
-- Add integration tests for WebSocket streaming and disconnect-flush behavior.
-- Add dynamic runtime tuning endpoint for VAD/noise/chunk configs.

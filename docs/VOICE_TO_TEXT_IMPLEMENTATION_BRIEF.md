@@ -1,6 +1,5 @@
 # Voice to Text Implementation Brief
 
-Prepared for: EAADI and DAB discussions
 Project: STT POC
 Date: 2026-03-23
 
@@ -130,6 +129,24 @@ Why this matters:
 - Current implementation is English-focused and enforces English path behavior.
 - Additional language support can be added as a controlled enhancement.
 
+### 6.6 How RxPY Helps Future-Proof the Platform
+
+RxPY provides a stream-processing foundation that supports controlled growth of this architecture as requirements evolve.
+
+- Stage extensibility:
+  new operators can be introduced for use cases like keyword detection, PII masking, confidence-based routing, and transcript enrichment without rewriting the full pipeline.
+- Multi-consumer fan-out:
+  one audio stream can feed multiple outputs in parallel (live UI transcript, analytics events, quality monitoring, and audit trails).
+- Policy-driven processing:
+  operator chains can be tuned per domain profile (for example stricter VAD/noise policies for high-noise channels).
+- Resilience composition:
+  timeout, retry, fallback, and error-handling behaviors can be expressed as stream-stage policies instead of ad hoc branching.
+- Observability boundaries:
+  each operator is a natural instrumentation point for stage latency, drop ratio, and throughput metrics.
+
+Trade-off note:
+RxPY is strongest when stream composition and branching complexity grows. If the workflow remains strictly linear over time, an asyncio queue model may be simpler to operate.
+
 ## 7. Design Decisions and Rationale
 
 1. WebSocket over request-response HTTP:
@@ -201,6 +218,7 @@ Why this matters:
 3. Build load-test profile for expected concurrency and burst scenarios.
 4. Add integration test suite for streaming edge cases.
 5. Create phase-2 roadmap for multilingual and diarization capabilities.
+6. Add a post-load-test decision checkpoint comparing RxPY and asyncio queue models using p95 latency, CPU usage, and maintainability metrics.
 
 ## 12. DAB Talking Points
 
